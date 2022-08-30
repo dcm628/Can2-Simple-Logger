@@ -1,19 +1,28 @@
 #include <Arduino.h>
 #include <FlexCAN.h>
 #include <kinetis_flexcan.h>
-#include <SD.h>
+#include <DMAChannel.h>
 #include <LittleFS.h>
 #include <EEPROM.h>
 #include <SPIFlash.h>
 #include <IntervalTimer.h>
 
+
+
 #include <deque>
 using std::deque;
 
-LittleFS_SPIFlash flash1;
+// For if/when to print to serial the current deque
+bool CandequePrint = true;
+elapsedMillis dequeprintMillis;
 
-SDClass sd;
-File sd_log_file;
+// Interupt timer for logging
+IntervalTimer logSDInterval;
+IntervalTimer readCANInterval;
+
+
+
+//------------------------------------------------------------------------------
 
 
 ///// CAN /////
@@ -23,7 +32,6 @@ CAN_message_t rxmsg;
 CAN_message_t extended;
 bool canReadReturn;
 
-bool CANSensorReportConverted = false;
 bool NewCommandMessage{false};
 bool NewConfigMessage{false};
 
@@ -35,6 +43,8 @@ CAN_filter_t allMbFilter;
 const int CAN2busSpeed = 500000; // CAN2.0 baudrate - do not set above 500000 for full distance run bunker to pad
 
 std::deque<CAN_message_t> Can2dequeLogAll;
+//std::deque<CAN_message_t>::iterator Can2StreamIt;
+size_t elementReadoutSize = 16;
 
 void serialPrintCAN_message_t(CAN_message_t msgIn)
 {
@@ -46,18 +56,113 @@ void serialPrintCAN_message_t(CAN_message_t msgIn)
     Serial.print(" : ");
     }
   Serial.println("");
+  Serial.flush();
 }
 
-void serialPrintCan2dequeLog()
+void serialPrintCAN_message_t(CAN_message_t msgIn, bool printSTDmsg)
 {
-  Serial.println("Can2dequeLogAll readout begin: ");
-  for (auto canIt : Can2dequeLogAll)
-  {
-    serialPrintCAN_message_t(canIt);
-  }
-  Serial.println("Can2dequeLogAll readout end: ");
+    size_t printLen;
+    Serial.print(msgIn.id);
+    Serial.print(":");
+    // Print
+    if (printSTDmsg)
+    {
+      printLen = 8;
+    }
+    else {printLen = msgIn.len;}
+
+    for (size_t i = 0; i < printLen; i++)
+    {
+      for (size_t j = 0; j < msgIn.len; j++)
+      {
+      Serial.print(msgIn.buf[j]);
+      Serial.print(",");
+      i++;
+      }
+    // if msgIn.len != printlLen, then print 0 for unused bytes
+    Serial.print(0);
+    Serial.print(",");
+    }
 }
 
+void serialPrintCan2dequeLog(bool removeBuffer)
+{
+  if (!Can2dequeLogAll.empty())
+  {
+    // If the arg bool is false, just print the deque without removing from it
+    if (!removeBuffer)
+    {
+    Serial.println("Can2dequeLogAll readout begin: ");
+    for (auto canIt : Can2dequeLogAll)
+    {
+      serialPrintCAN_message_t(canIt, true);
+    }
+    Serial.println("Can2dequeLogAll readout end: ");
+    }
+    // If the arg bool is true, write to serial as the logging output stream and remove sent data from deque
+    else
+    {
+      // If deque size small enough to read whole thing
+      if (Can2dequeLogAll.size() <= elementReadoutSize)
+      {
+        for (auto Can2StreamIt = Can2dequeLogAll.begin(); Can2StreamIt != Can2dequeLogAll.end(); Can2StreamIt++)
+        {
+          serialPrintCAN_message_t(*Can2StreamIt, true);
+          //Can2dequeLogAll.erase(Can2StreamIt);
+        }
+        // Since size is smaller than our element print line, can just clear whole deque at the end?
+        Can2dequeLogAll.clear();
+      }
+      else
+      {
+        //for (auto Can2StreamIt = Can2dequeLogAll.begin(); std::distance(Can2dequeLogAll.begin(), Can2StreamIt) <= elementReadoutSize; Can2StreamIt++)
+        for (auto Can2StreamIt = Can2dequeLogAll.begin(); Can2StreamIt <= (Can2dequeLogAll.begin() + elementReadoutSize + 1); Can2StreamIt++)
+        {
+          serialPrintCAN_message_t(*Can2StreamIt, true);
+        }
+        Can2dequeLogAll.erase(Can2dequeLogAll.begin(),Can2dequeLogAll.begin() + elementReadoutSize);
+      }
+        
+      Serial.println("");
+      Serial.flush();
+    }
+  }
+}
+
+
+void testIntFunc()
+{
+  Serial.print("did Interval run: micros: ");
+  Serial.print(micros());
+  Serial.println("");
+}
+
+void CanIntervalRead()
+{
+  // For loop pulls the number of CAN frames Can0.available() returns as in the rx ring buffer
+  for (size_t i = 0; i < Can0.available(); i++)
+  {
+  //cli();  // disables interrupts
+    // Read message into rxmsg struct
+    canReadReturn = Can0.read(rxmsg);
+    // if Can0.read returns 0 no message was read, break before writing rxmsg to deque
+    if (!canReadReturn)
+    {
+      break;
+    }
+    // Add rxmsg to the end of the deque
+    Can2dequeLogAll.push_back(rxmsg);
+  //sei();  // enables interrupts
+  }
+  
+  // Print the deque if bool is true and polls true vs timer
+  if (CandequePrint && (dequeprintMillis >= 500))
+  {
+  // Print entire deque of Can frames
+  //serialPrintCan2dequeLog(false);
+  dequeprintMillis = 0;
+  }
+}
 
 void setup() 
 {
@@ -68,12 +173,24 @@ void setup()
   allMbFilter.flags.remote = 0; // Sets mailboxes to ignore RTR frames
   //allMbFilter.id = 0; // Sets mailboxes to accept ID??? frames, I think if you set an ID here is filters that ID out?
 
-
+  // SD logging, perhaps don't run on interval but do it constantly. Maybe I have a deque size trigger and an interval trigger to call it.
+  //logSDInterval.begin(testIntFunc, 500000);
+  //logSDInterval.priority(124);
+  // Can has mailboxes and ring buffer, as long as ring buffer isn't overrun don't need to read it more frequently
+  readCANInterval.begin(CanIntervalRead,6400);
+  readCANInterval.priority(120);
 }
 
 void loop() 
 {
-  // For loop pulls the number of CAN frames Can0.available() returns as in the rx ring buffer
+// 
+if (dequeprintMillis >= 100 || Can2dequeLogAll.size() >= (elementReadoutSize + 1))
+{
+serialPrintCan2dequeLog(true);
+dequeprintMillis = 0;
+}
+
+/*   // For loop pulls the number of CAN frames Can0.available() returns as in the rx ring buffer
   for (size_t i = 0; i < Can0.available(); i++)
   {
   cli();  // disables interrupts
@@ -89,10 +206,12 @@ void loop()
   sei();  // enables interrupts
   }
   
+  // Print the deque if bool is true and polls true vs timer
+  if (CandequePrint && (dequeprintMillis >= 500))
+  {
   // Print entire deque of Can frames
   serialPrintCan2dequeLog();
-
-  //Serial.print("sizeof(CAN_message_t)");
-  //Serial.print(sizeof(CAN_message_t));
-  //Serial.println();
+  dequeprintMillis = 0;
+  }
+ */
 }
