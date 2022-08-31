@@ -20,6 +20,13 @@ elapsedMillis dequeprintMillis;
 IntervalTimer logSDInterval;
 IntervalTimer readCANInterval;
 
+// "humanReadable" means printing chars not raw data bytes and with delimeters. Should be safe to use with any CAN2 only system but several times less data efficient.
+bool humanReadableLogStream = true;
+union CAN_ID_Union
+{
+  uint32_t idInput;
+  uint8_t idByteArrayOutput[4];
+};
 
 
 //------------------------------------------------------------------------------
@@ -61,27 +68,66 @@ void serialPrintCAN_message_t(CAN_message_t msgIn)
 
 void serialPrintCAN_message_t(CAN_message_t msgIn, bool printSTDmsg)
 {
-    size_t printLen;
-    Serial.print(msgIn.id);
-    Serial.print(":");
-    // Print
-    if (printSTDmsg)
-    {
-      printLen = 8;
-    }
-    else {printLen = msgIn.len;}
 
-    for (size_t i = 0; i < printLen; i++)
+    CAN_ID_Union idSplit;
+    idSplit.idInput = msgIn.id;
+    
+    // Switch Serial.print to Serial.write for more efficient but less readable data, requires splitting bytes of id field.
+    size_t printLen;
+    if (humanReadableLogStream)
     {
+      Serial.print(msgIn.id);
+      Serial.print(":");
+      // Print
+      if (printSTDmsg)
+      {
+        printLen = 8;
+      }
+      else {printLen = msgIn.len;}
+
+        
       for (size_t j = 0; j < msgIn.len; j++)
       {
+      //if (j != 0){Serial.print(",");}
       Serial.print(msgIn.buf[j]);
       Serial.print(",");
-      i++;
       }
-    // if msgIn.len != printlLen, then print 0 for unused bytes
-    Serial.print(0);
-    Serial.print(",");
+      // if msgIn.len != printlLen, then print 0 for unused bytes
+      for (size_t i = msgIn.len; i < printLen; i++)
+      {
+      //if (i != 0){Serial.print(",");}
+      Serial.print(0);
+      Serial.print(",");
+      }
+    }
+    else
+    // Format uses standard length printing as extended ID, 8 byte frames but no delimeters and raw data not ASCII chars
+    // This does waste some bandwidth, but not much because standardizing number of bytes every frame eliminates fields for ID size and number of data bytes.
+    {
+      //Serial.print("check ID");
+      Serial.write(idSplit.idByteArrayOutput[3]);
+      Serial.write(idSplit.idByteArrayOutput[2]);
+      Serial.write(idSplit.idByteArrayOutput[1]);
+      Serial.write(idSplit.idByteArrayOutput[0]);
+      //Serial.print("should have read: ");
+      //Serial.print(msgIn.id);
+      //Serial.print(" ");
+      // Print
+      if (printSTDmsg)
+      {
+        printLen = 8;
+      }
+      else {printLen = msgIn.len;}
+
+      for (size_t j = 0; j < msgIn.len; j++)
+      {
+      Serial.write(msgIn.buf[j]);
+      }
+      // if msgIn.len != printlLen, then print 0 for unused bytes.
+      for (size_t i = msgIn.len; i < printLen; i++)
+      {
+      Serial.write(0);
+      }
     }
 }
 
