@@ -14,7 +14,9 @@ using std::deque;
 
 // For if/when to print to serial the current deque
 bool CandequePrint = true;
+bool CANdubugPrint = true;
 elapsedMillis dequeprintMillis;
+elapsedMillis CANdebugPrintMillis;
 
 // Interupt timer for logging
 IntervalTimer logSDInterval;
@@ -42,7 +44,10 @@ bool canReadReturn;
 bool NewCommandMessage{false};
 bool NewConfigMessage{false};
 
-CAN_filter_t allMbFilter;
+CAN_filter_t allowExtendedIDFilter;
+CAN_filter_t allowStandardIDFilter;
+
+CAN_stats_t Can0stats;
 
 //FlexCan3Controller Can2msgController;
 //SerialUSBController SerialUSBdataController;
@@ -99,6 +104,7 @@ void serialPrintCAN_message_t(CAN_message_t msgIn, bool printSTDmsg)
       Serial.print(0);
       Serial.print(",");
       }
+      //Serial.println();
     }
     else
     // Format uses standard length printing as extended ID, 8 byte frames but no delimeters and raw data not ASCII chars
@@ -214,10 +220,24 @@ void setup()
 {
 
   // CAN0 - FlexCAN 2.0 bus
+  //Can0.setTxBufferSize(64);
+  Can0.setRxBufferSize(5000);
   Can0.begin(CAN2busSpeed);
-  allMbFilter.flags.extended = 1; // Sets mailboxes to accept extended ID frames
-  allMbFilter.flags.remote = 0; // Sets mailboxes to ignore RTR frames
+  allowExtendedIDFilter.flags.extended = 1; // Sets mailboxes to accept extended ID frames
+  allowExtendedIDFilter.flags.remote = 0; // Sets mailboxes to ignore RTR frames
+  allowStandardIDFilter.flags.extended = 0; // Sets mailboxes to reject extended ID frames
+  allowStandardIDFilter.flags.remote = 0; // Sets mailboxes to ignore RTR frames
+  
+  
   //allMbFilter.id = 0; // Sets mailboxes to accept ID??? frames, I think if you set an ID here is filters that ID out?
+
+  //set all mb filters
+  for (uint8_t filterNum = 5; filterNum < 16;filterNum++){
+    Can0.setFilter(allowExtendedIDFilter,filterNum); 
+  }
+  for (uint8_t filterNum = 0; filterNum < 5;filterNum++){
+    Can0.setFilter(allowStandardIDFilter,filterNum); 
+  }
 
   // SD logging, perhaps don't run on interval but do it constantly. Maybe I have a deque size trigger and an interval trigger to call it.
   //logSDInterval.begin(testIntFunc, 500000);
@@ -225,10 +245,30 @@ void setup()
   // Can has mailboxes and ring buffer, as long as ring buffer isn't overrun don't need to read it more frequently
   readCANInterval.begin(CanIntervalRead,6400);
   readCANInterval.priority(120);
+
+  Can0.startStats();
 }
 
 void loop() 
 {
+if (CANdebugPrintMillis >= 100 && CANdubugPrint)
+{
+  Can0stats = Can0.getStats();
+  Serial.print("Can0stats.ringRxMax? ");
+  Serial.println(Can0stats.ringRxMax);
+  Serial.print("Can0stats.ringRxHighWater? ");
+  Serial.println(Can0stats.ringRxHighWater);
+  for (size_t i = 0; i < 16; i++)
+  {
+    Serial.print(" mb:  ");
+    Serial.print(i);
+    Serial.print(" use count:  ");
+    Serial.print(Can0stats.mb->refCount);
+    Serial.print(" overrun count:  ");
+    Serial.println(Can0stats.mb->overrunCount);
+  }
+}
+
 // 
 if (dequeprintMillis >= 100 || Can2dequeLogAll.size() >= (elementReadoutSize + 1))
 {
